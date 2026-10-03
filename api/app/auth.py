@@ -2,9 +2,10 @@
 Аутентификация пользователей.
 
 Защиты:
-  CWE-916  — bcrypt cost 12 вместо MD5/SHA1
-  CWE-307  — счётчик неудач + блокировка аккаунта
-  CWE-204  — единое сообщение об ошибке
+  CWE-916  - bcrypt cost 12 вместо MD5/SHA1
+  CWE-307  - rate limit по IP (таблица login_attempts)
+  CWE-204  - единое сообщение об ошибке, фиктивный bcrypt
+             для несуществующих username
 """
 
 import time, secrets, bcrypt
@@ -13,18 +14,53 @@ from app.audit import log_event
 
 
 # ---- Параметры аутентификации ----
-BCRYPT_ROUNDS   = 12
-MAX_FAILED      = 5
-LOCKOUT_SECONDS = 300
+BCRYPT_ROUNDS = 12
+
+# ---- Параметры rate limit (по IP) ----
+MAX_ATTEMPTS_PER_IP = 5       # неудачных попыток
+IP_WINDOW_SECONDS   = 300      # за 5 минут
 
 # ---- Параметры сессий ----
 SESSION_TTL_MIN = 60
 
 
 class AuthError(Exception):
-    """Общая ошибка аутентификации. Не раскрывает деталей (CWE-209)."""
+    """Неверные учётные данные. Единый текст - без раскрытия деталей."""
 
 
+class RateLimitError(Exception):
+    """Слишком много неудачных попыток с одного IP."""
+
+
+# ---- Rate limit (CWE-307) ----
+def _record_failed_attempt(ip: str, username: str) -> None:
+    """Логирует неудачную попытку и заодно чистит старые записи."""
+    execute(
+        "INSERT INTO login_attempts (ip, username) VALUES (%s, %s)",
+        (ip, username),
+    )
+    _cleanup_old_attempts()
+
+
+def _ip_attempts_in_window(ip: str) -> int:
+    """Сколько неудачных попыток было с этого IP за окно."""
+    row = fetch_one(
+        "SELECT COUNT(*) AS cnt FROM login_attempts "
+        "WHERE ip = %s AND attempted_at > NOW() - INTERVAL '%s seconds'",
+        (ip, IP_WINDOW_SECONDS),
+    )
+    return int(row["cnt"]) if row else 0
+
+
+def _cleanup_old_attempts() -> None:
+    """Домашняя уборка: удаляем записи старше суток."""
+    execute(
+        "DELETE FROM login_attempts "
+        "WHERE attempted_at < NOW() - INTERVAL '1 day'"
+    )
+
+
+# ---- Регистрация ----
 def register_user(username: str, password: str) -> int:
     """Создаёт нового пользователя."""
     username = username.strip().lower()
@@ -50,62 +86,45 @@ def register_user(username: str, password: str) -> int:
     return user_id
 
 
-def _is_locked(row: dict) -> tuple[bool, int]:
-    locked_until = row.get("locked_until")
-    if locked_until and locked_until.timestamp() > time.time():
-        return True, int(locked_until.timestamp() - time.time())
-    return False, 0
+# ---- Аутентификация ----
+def authenticate(username: str, password: str, ip: str) -> dict:
+    """
+    Проверка пары логин/пароль с rate limit по IP.
 
+    Возвращает dict {id, username} при успехе,
+    бросает RateLimitError или AuthError.
+    """
 
-def _register_failure(user_id: int, current_failed: int) -> None:
-    new_failed = current_failed + 1
-    if new_failed >= MAX_FAILED:
-        execute(
-            "UPDATE users SET failed_count = %s, "
-            "locked_until = NOW() + INTERVAL '%s seconds' "
-            "WHERE id = %s",
-            (new_failed, LOCKOUT_SECONDS, user_id),
-        )
-    else:
-        execute(
-            "UPDATE users SET failed_count = %s WHERE id = %s",
-            (new_failed, user_id),
+    # 1. Rate limit: сколько неудач было с этого IP за окно
+    attempts = _ip_attempts_in_window(ip)
+    if attempts >= MAX_ATTEMPTS_PER_IP:
+        # Раскрываем только факт rate limit - не то, существует ли username.
+        raise RateLimitError(
+            f"Слишком много попыток входа. Повторите через "
+            f"{IP_WINDOW_SECONDS // 60} мин."
         )
 
-
-def authenticate(username: str, password: str) -> dict:
-    """
-    Проверка пары логин/пароль.
-    Возвращает строку пользователя (dict) или бросает AuthError.
-    """
-    username = username.strip().lower()
-    
+    # 2. Ищем пользователя
     row = fetch_one(
-        "SELECT id, username, password_hash, failed_count, locked_until "
+        "SELECT id, username, password_hash "
         "FROM users WHERE username = %s",
-        (username,),
+        (username.strip().lower(),),
     )
 
-    # Даже если пользователя нет — считаем bcrypt-хеш фиктивно,
-    # чтобы выровнять время ответа (CWE-204, CWE-208).
+    # 3. Фиктивный bcrypt для несуществующих username -
+    #    выравнивает время ответа (CWE-204, CWE-208)
     if row is None:
         bcrypt.hashpw(b"dummy", bcrypt.gensalt(rounds=BCRYPT_ROUNDS))
+        _record_failed_attempt(ip, username)
         raise AuthError("Неверное имя пользователя или пароль.")
 
-    locked, remaining = _is_locked(row)
-    if locked:
-        raise AuthError(f"Аккаунт заблокирован. Повторите через {remaining} с.")
-
+    # 4. Проверка пароля
     if not bcrypt.checkpw(password.encode("utf-8"),
                           row["password_hash"].encode("utf-8")):
-        _register_failure(row["id"], row["failed_count"])
+        _record_failed_attempt(ip, username)
         raise AuthError("Неверное имя пользователя или пароль.")
 
-    # Успех — сбрасываем счётчики
-    execute(
-        "UPDATE users SET failed_count = 0, locked_until = NULL WHERE id = %s",
-        (row["id"],),
-    )
+    # 5. Успех
     log_event(row["id"], None, "login", f"Успешный вход {row['username']}")
     return {"id": row["id"], "username": row["username"]}
 

@@ -12,7 +12,7 @@
 
 Согласованность БД и диска:
   файловые операции не транзакционны, поэтому используем
-  компенсирующие действия — при сбое БД откатываем изменения на диске.
+  компенсирующие действия - при сбое БД откатываем изменения на диске.
 """
 
 import os, psutil
@@ -69,7 +69,7 @@ def _safe_path(user_id: int, relative: str) -> Path:
     пользователя. Бросает ValueError, если путь выходит за её пределы.
     """
 
-    # Убираем ведущие слеши: "/docs/x.txt" и "docs/x.txt" — одно и то же.
+    # Убираем ведущие слеши: "/docs/x.txt" и "docs/x.txt" - одно и то же.
     # Иначе Path(root) / "/docs/x.txt" даст абсолютный "/docs/x.txt" (POSIX),
     # и проверка is_relative_to справедливо отбросит запрос.
     relative = relative.strip().lstrip("/")
@@ -108,7 +108,7 @@ def create_file(user_id: int, relative: str, content: bytes) -> int:
     Порядок операций:
       1. Записать файл на диск (легко откатить через unlink).
       2. В одной транзакции: INSERT в files + INSERT в operations.
-      3. Если БД упала — удалить файл с диска.
+      3. Если БД упала - удалить файл с диска.
     """
 
     path = _safe_path(user_id, relative)
@@ -175,7 +175,7 @@ def update_file(user_id: int, relative: str, content: bytes) -> None:
     if file_id is None:
         raise FileNotFoundError(relative)
 
-    # Запоминаем старое содержимое — понадобится для отката
+    # Запоминаем старое содержимое - понадобится для отката
     old_content = path.read_bytes()
 
     # 1. Диск
@@ -201,6 +201,10 @@ def delete_file(user_id: int, relative: str) -> None:
     Удаление файла и записи из БД. Фиксирует delete.
 
     При сбое БД восстанавливаем удалённый файл из памяти.
+
+    NB: log_event вызывается с file_id=None, потому что строка в files
+    уже удалена и FK-констрейнт operations.file_id -> files.id
+    не пропустит ссылку на несуществующий id.
     """
 
     path = _safe_path(user_id, relative)
@@ -211,7 +215,7 @@ def delete_file(user_id: int, relative: str) -> None:
     if file_id is None:
         raise FileNotFoundError(relative)
 
-    # Запоминаем содержимое — понадобится для отката
+    # Запоминаем содержимое - понадобится для отката
     old_content = path.read_bytes()
 
     # 1. Диск
@@ -221,7 +225,7 @@ def delete_file(user_id: int, relative: str) -> None:
     try:
         with transaction() as cur:
             cur.execute("DELETE FROM files WHERE id = %s", (file_id,))
-            log_event(user_id, file_id, "delete",
+            log_event(user_id, None, "delete",
                       f"Удалён файл {relative}", cur=cur)
     except Exception:
         # 3. Компенсация: восстанавливаем файл

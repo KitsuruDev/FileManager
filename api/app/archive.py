@@ -7,7 +7,7 @@
   Zip-bomb          - ограничение на общий распакованный размер
 
 Согласованность БД и диска:
-  create_zip:   если ZIP создан, но запись в files/operations не удалась —
+  create_zip:   если ZIP создан, но запись в files/operations не удалась -
                 удаляем недописанный или "осиротевший" архив.
   extract_zip:  при сбое в середине распаковки удаляем только те файлы
                 и каталоги, которые создали сами.
@@ -84,7 +84,7 @@ def extract_zip(user_id: int, relative_zip: str, target_dir: str) -> list[str]:
     При сбое в середине распаковки удаляем только то, что создали сами:
       - новые файлы
       - новые каталоги
-    Существовавшие ранее файлы оставляем — их прежнее содержимое
+    Существовавшие ранее файлы оставляем - их прежнее содержимое
     восстановить нельзя, это известное ограничение компенсации.
     """
     zip_path = _safe_path(user_id, relative_zip)
@@ -118,7 +118,7 @@ def extract_zip(user_id: int, relative_zip: str, target_dir: str) -> list[str]:
                 if total_uncompressed > MAX_TOTAL_UNCOMPRESSED:
                     raise ValueError("Превышен лимит распакованных данных.")
 
-                # Создаём родительские каталоги и запоминаем только новые —
+                # Создаём родительские каталоги и запоминаем только новые -
                 # чтобы при откате не снести чужие папки
                 for parent in _missing_parents(dest.parent, target):
                     parent.mkdir()
@@ -126,7 +126,7 @@ def extract_zip(user_id: int, relative_zip: str, target_dir: str) -> list[str]:
 
                 was_existing = dest.exists()
 
-                # Ручная запись байт — гарантируем, что данные уйдут
+                # Ручная запись байт - гарантируем, что данные уйдут
                 # ровно в проверенный dest
                 with zf.open(info) as src, open(dest, "wb") as out:
                     while chunk := src.read(8192):
@@ -138,7 +138,7 @@ def extract_zip(user_id: int, relative_zip: str, target_dir: str) -> list[str]:
                 extracted.append(str(dest.relative_to(user_root)))
 
     except Exception:
-        # Компенсация: удаляем созданные файлы, затем — созданные каталоги
+        # Компенсация: удаляем созданные файлы, затем - созданные каталоги
         for f in reversed(created_files):
             f.unlink(missing_ok=True)
         for d in reversed(created_dirs):
@@ -158,7 +158,7 @@ def extract_zip(user_id: int, relative_zip: str, target_dir: str) -> list[str]:
 def _missing_parents(directory: Path, stop: Path) -> list[Path]:
     """
     Возвращает список каталогов от `stop` (исключительно) до `directory`
-    включительно, которых ещё нет на диске. Порядок — от старших к младшим,
+    включительно, которых ещё нет на диске. Порядок - от старших к младшим,
     чтобы их можно было создать через .mkdir() по одному.
     """
     missing: list[Path] = []

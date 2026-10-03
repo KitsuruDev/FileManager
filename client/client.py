@@ -1,6 +1,11 @@
 """
 Консольный клиент файлового менеджера.
 Общается с сервером по HTTPS через nginx.
+
+Создание и загрузка файлов - с автоопределением формата по расширению:
+  .json -> валидация JSON и save_json
+  .xml  -> save_xml (валидация на сервере через lxml)
+  иначе -> create_file (raw)
 """
 
 import os, base64, json, requests
@@ -10,6 +15,18 @@ from urllib.parse import quote
 
 API_URL   = os.getenv("API_URL", "https://nginx")
 CA_BUNDLE = os.getenv("CA_BUNDLE", "/certs/server.crt")
+
+# Расширения, содержимое которых нельзя ввести текстом.
+# Создать такие файлы можно только через загрузку (команда 4)
+# или специализированные команды (например, ZIP через команду 8).
+BINARY_EXTENSIONS = {
+    ".zip", ".gz", ".tar", ".rar", ".7z", ".bz2", ".xz",
+    ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
+    ".exe", ".dll", ".so", ".iso", ".dylib", ".bin",
+    ".mp3", ".mp4", ".avi", ".mov", ".mkv", ".wav",
+    ".docx", ".xlsx", ".pptx", ".odt", ".ods",
+    ".sqlite", ".db",
+}
 
 
 class SessionExpired(Exception):
@@ -27,6 +44,15 @@ class ApiError(Exception):
         self.message = message
 
 
+def _is_binary_extension(path: str) -> bool:
+    """True, если расширение файла предполагает бинарное содержимое."""
+    p = path.lower().strip()
+    for ext in BINARY_EXTENSIONS:
+        if p.endswith(ext):
+            return True
+    return False
+
+
 def _ok(result: tuple[int, dict]) -> dict:
     """
     Разбирает ответ (code, data).
@@ -41,6 +67,7 @@ def _ok(result: tuple[int, dict]) -> dict:
         raise ApiError(code, data.get("error", "Неизвестная ошибка"))
     return data
 
+
 def _encode_text(s: str) -> bytes:
     """
     UTF-8 с игнорированием суррогатов, которые иногда приходят
@@ -50,12 +77,37 @@ def _encode_text(s: str) -> bytes:
     return s.encode("utf-8", errors="ignore")
 
 
+def _detect_format(path: str) -> str:
+    """Определяет формат по расширению: 'json', 'xml' или 'raw'."""
+    p = path.lower().strip()
+    if p.endswith(".json"):
+        return "json"
+    if p.endswith(".xml"):
+        return "xml"
+    return "raw"
+
+
+def _is_binary(data: bytes) -> bool:
+    """
+    Эвристика: файл считается бинарным, если в первых 8 КБ есть нулевые
+    байты или содержимое не декодируется как UTF-8.
+    Ловит ZIP, PDF, картинки, архивы и прочее.
+    """
+    sample = data[:8192]
+    if b"\x00" in sample:
+        return True
+    try:
+        sample.decode("utf-8")
+        return False
+    except UnicodeDecodeError:
+        return True
+
+
 class ApiClient:
     def __init__(self):
         self.session = requests.Session()
         self.session.verify = CA_BUNDLE   # проверяем сертификат сервера
         self.token: str | None = None
-
 
     # низкоуровневые обёртки
     def _headers(self) -> dict:
@@ -78,7 +130,6 @@ class ApiClient:
     def _norm(path: str) -> str:
         """Убирает ведущие слеши из пользовательского пути."""
         return path.strip().lstrip("/")
-
 
     # публичное API
     def health(self):
@@ -134,17 +185,9 @@ class ApiClient:
         return self._call("POST", "/api/json",
                           json={"path": path, "value": value})
 
-    def load_json(self, path: str):
-        rel = quote(self._norm(path), safe="/")
-        return self._call("GET", f"/api/json/{rel}")
-
     def save_xml(self, path: str, xml_text: str):
         return self._call("POST", "/api/xml",
                           json={"path": path, "xml": xml_text})
-
-    def load_xml(self, path: str):
-        rel = quote(self._norm(path), safe="/")
-        return self._call("GET", f"/api/xml/{rel}")
 
     def create_zip(self, archive: str, files: list[str]):
         return self._call("POST", "/api/zip",
@@ -191,23 +234,143 @@ def cmd_files(api: ApiClient, _username: str):
 
 
 def cmd_create(api: ApiClient, _username: str):
-    rel  = input("Путь: ").strip()
-    text = input("Содержимое: ")
-    data = _ok(api.create_file(rel, text.encode()))
-    print("\n  [+] Файл создан")
+    """
+    Создание файла. Формат определяется по расширению пути:
+      .json -> локальная валидация JSON, save_json
+      .xml  -> save_xml (валидация на сервере)
+      иначе -> create_file (raw)
+    """
+    rel = input("Путь (например note.txt, data.json, data.xml): ").strip()
+    if not rel:
+        print("\n[!] Пустой путь.")
+        return
+
+    if _is_binary_extension(rel):
+        print("\n[!] Нельзя создать бинарный файл из текстового ввода.")
+        print("    Для этого используйте:")
+        print("      - команду 4 «Загрузить файл с ПК» - если файл уже есть на хосте")
+        if rel.lower().endswith(".zip"):
+            print("      - команду 8 «Создать ZIP» - собрать архив из файлов на сервере")
+        return
+
+    fmt = _detect_format(rel)
+
+    if fmt == "json":
+        raw = input("JSON-строка: ")
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"\n[!] Некорректный JSON: {e}")
+            return
+        _ok(api.save_json(rel, obj))
+        print("\n  [+] JSON создан")
+
+    elif fmt == "xml":
+        xml = input("XML (одной строкой): ")
+        _ok(api.save_xml(rel, xml))
+        print("\n  [+] XML создан")
+
+    else:
+        text = input("Содержимое: ")
+        _ok(api.create_file(rel, _encode_text(text)))
+        print("\n  [+] Файл создан")
+
+
+def cmd_upload(api: ApiClient, _username: str):
+    """
+    Загрузка локального файла из /uploads в домашнюю директорию пользователя.
+    Формат определяется по расширению удалённого пути.
+    """
+    local  = input("Путь к локальному файлу (например /uploads/data.json): ").strip()
+    remote = input("Путь на сервере (например docs/data.json): ").strip()
+    if not local or not remote:
+        print("\n[!] Пустой путь.")
+        return
+
+    try:
+        with open(local, "rb") as f:
+            content = f.read()
+    except OSError as e:
+        print(f"\n[!] Не удалось прочитать {local}: {e}")
+        return
+
+    fmt = _detect_format(remote)
+
+    if fmt == "json":
+        try:
+            obj = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            print(f"\n[!] Файл не является корректным JSON: {e}")
+            return
+        _ok(api.save_json(remote, obj))
+        print(f"\n  [+] JSON загружен ({len(content)} байт)")
+
+    elif fmt == "xml":
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as e:
+            print(f"\n[!] XML должен быть в UTF-8: {e}")
+            return
+        _ok(api.save_xml(remote, text))
+        print(f"\n  [+] XML загружен ({len(content)} байт)")
+
+    else:
+        _ok(api.create_file(remote, content))
+        print(f"\n  [+] Загружено ({len(content)} байт)")
 
 
 def cmd_read(api: ApiClient, _username: str):
+    """Чтение файла. Бинарные файлы (ZIP, PDF и т.п.) не отображаются."""
     rel = input("Путь: ").strip()
     data = _ok(api.read_file(rel))
-    print(data["content"].decode("utf-8", errors="replace"))
+    content = data["content"]
+
+    if _is_binary(content):
+        print(f"\n  [двоичный файл, {len(content)} байт, не отображается]")
+        return
+
+    print(content.decode("utf-8", errors="replace"))
 
 
 def cmd_update(api: ApiClient, _username: str):
-    rel  = input("Путь: ").strip()
-    text = input("Новое содержимое: ")
-    _ok(api.update_file(rel, text.encode()))
-    print("\n  [+] Обновлено")
+    """
+    Обновление файла. Формат определяется по расширению:
+      .json -> валидация JSON и сериализация с indent=2
+      .xml  -> raw-запись через update_file
+      иначе -> raw-запись
+    """
+    rel = input("Путь: ").strip()
+    if not rel:
+        print("\n[!] Пустой путь.")
+        return
+
+    if _is_binary_extension(rel):
+        print("\n[!] Нельзя перезаписать бинарный файл текстовым содержимым.")
+        print("   - Для этого используйте команду 4 «Загрузить файл с ПК».")
+        return
+
+    fmt = _detect_format(rel)
+
+    if fmt == "json":
+        raw = input("Новое JSON-содержимое: ")
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"\n[!] Некорректный JSON: {e}")
+            return
+        text = json.dumps(obj, ensure_ascii=False, indent=2)
+        _ok(api.update_file(rel, _encode_text(text)))
+        print("\n  [+] JSON обновлён")
+
+    elif fmt == "xml":
+        xml = input("Новое XML-содержимое: ")
+        _ok(api.update_file(rel, _encode_text(xml)))
+        print("\n  [+] XML обновлён")
+
+    else:
+        text = input("Новое содержимое: ")
+        _ok(api.update_file(rel, _encode_text(text)))
+        print("\n  [+] Обновлено")
 
 
 def cmd_delete(api: ApiClient, _username: str):
@@ -216,42 +379,11 @@ def cmd_delete(api: ApiClient, _username: str):
     print("\n  [+] Удалено")
 
 
-def cmd_save_json(api: ApiClient, _username: str):
-    rel = input("Путь (например data.json): ").strip()
-    raw = input("JSON-строка: ")
-    try:
-        obj = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"\n[!] Некорректный JSON: {e}")
-        return
-    _ok(api.save_json(rel, obj))
-    print("\n  [+] JSON сохранён")
-
-
-def cmd_load_json(api: ApiClient, _username: str):
-    rel = input("Путь: ").strip()
-    data = _ok(api.load_json(rel))
-    print(json.dumps(data.get("value"), ensure_ascii=False, indent=2))
-
-
-def cmd_save_xml(api: ApiClient, _username: str):
-    rel = input("Путь (например data.xml): ").strip()
-    xml = input("XML (одной строкой): ")
-    _ok(api.save_xml(rel, xml))
-    print("\n  [+] XML сохранён")
-
-
-def cmd_load_xml(api: ApiClient, _username: str):
-    rel = input("Путь: ").strip()
-    data = _ok(api.load_xml(rel))
-    print(data.get("xml", ""))
-
-
 def cmd_create_zip(api: ApiClient, _username: str):
     archive = input("Путь к архиву (например backup.zip): ").strip()
     files_s = input("Файлы через запятую: ")
     files = [f.strip() for f in files_s.split(",") if f.strip()]
-    data = _ok(api.create_zip(archive, files))
+    _ok(api.create_zip(archive, files))
     print("\n  [+] Архив создан")
 
 
@@ -260,23 +392,6 @@ def cmd_extract_zip(api: ApiClient, _username: str):
     target  = input("Куда распаковать: ").strip()
     data = _ok(api.extract_zip(archive, target))
     print(f"\n  [+] Распаковано файлов: {len(data.get('files', []))}")
-
-def cmd_upload(api: ApiClient, _username: str):
-    """
-    Загрузка локального файла на сервер.
-    Локальный файл должен быть доступен внутри контейнера клиента —
-    например, через примонтированную папку /uploads.
-    """
-    local  = input("Путь к локальному файлу (например /uploads/note.txt): ").strip()
-    remote = input("Путь на сервере (например docs/note.txt): ").strip()
-    try:
-        with open(local, "rb") as f:
-            content = f.read()
-    except OSError as e:
-        print(f"\n[!] Не удалось прочитать {local}: {e}")
-        return
-    _ok(api.create_file(remote, content))
-    print(f"\n  [+] Загружено ({len(content)} байт)")
 
 
 def cmd_audit(api: ApiClient, _username: str):
@@ -301,13 +416,9 @@ MENU = {
     "5":  ("Прочитать файл",       cmd_read),
     "6":  ("Обновить файл",        cmd_update),
     "7":  ("Удалить файл",         cmd_delete),
-    "8":  ("Сохранить JSON",       cmd_save_json),
-    "9":  ("Загрузить JSON",       cmd_load_json),
-    "10": ("Сохранить XML",        cmd_save_xml),
-    "11": ("Загрузить XML",        cmd_load_xml),
-    "12": ("Создать ZIP",          cmd_create_zip),
-    "13": ("Распаковать ZIP",      cmd_extract_zip),
-    "14": ("Журнал аудита",        cmd_audit),
+    "8":  ("Создать ZIP",          cmd_create_zip),
+    "9":  ("Распаковать ZIP",      cmd_extract_zip),
+    "10": ("Журнал аудита",        cmd_audit),
     "0":  ("Выход",                None),
 }
 
@@ -332,7 +443,7 @@ def menu(api: ApiClient, username: str):
             entry[1](api, username)
         except SessionExpired as e:
             print(f"\n[!] {e.message}. Войдите заново.")
-            return                    # возвращаемся в главное меню
+            return
         except ApiError as e:
             print(f"\n[!] Ошибка {e.code}: {e.message}")
 

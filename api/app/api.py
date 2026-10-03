@@ -1,5 +1,5 @@
 """
-HTTP-слой. Все эндпоинты — JSON in / JSON out.
+HTTP-слой. Все эндпоинты - JSON in / JSON out.
 Никакого HTML и инлайн-вставок пользовательских данных -> CWE-79 закрыт.
 """
 
@@ -20,6 +20,15 @@ from app.db import fetch_all
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 МБ
+
+
+def _client_ip() -> str:
+    """
+    Реальный IP клиента за nginx.
+    nginx прокидывает X-Real-IP;
+    fallback - remote_addr напрямую.
+    """
+    return (request.headers.get("X-Real-IP") or request.remote_addr or "unknown")
 
 
 # Аутентификация
@@ -47,7 +56,7 @@ def _decode_b64(value) -> bytes:
 
 @app.errorhandler(Exception)
 def on_error(e):
-    """CWE-209: наружу — обобщённое сообщение, детали — только в лог."""
+    """CWE-209: наружу - обобщённое сообщение, детали - только в лог."""
     # HTTPException (404, 405, 400 и т.д.) должен обрабатываться Flask-ом,
     # иначе клиент получит 500 вместо настоящего кода ошибки.
     if isinstance(e, HTTPException):
@@ -78,7 +87,10 @@ def login():
         user = auth.authenticate(
             str(data.get("username") or ""),
             str(data.get("password") or ""),
+            ip=_client_ip(),
         )
+    except auth.RateLimitError as e:
+        return jsonify(error=str(e)), 429
     except auth.AuthError as e:
         return jsonify(error=str(e)), 401
 
@@ -259,17 +271,24 @@ def api_audit():
     """
     Журнал аудита пользователя.
     JOIN с users, чтобы видеть, кто сделал операцию
-    (user_id хранится в operations, username — в users).
+    (user_id хранится в operations, username - в users).
+
+    Берём последние 100 записей (самые свежие), но выводим их
+    в хронологическом порядке - от старых к новым.
     """
     rows = fetch_all(
-        "SELECT o.timestamp, u.username, o.operation_type, o.details "
-        "FROM operations o "
-        "LEFT JOIN users u ON u.id = o.user_id "
-        "WHERE o.user_id = %s "
-        "ORDER BY o.timestamp DESC LIMIT 100",
+        "SELECT * FROM ("
+        "    SELECT o.timestamp, u.username, o.operation_type, o.details "
+        "    FROM operations o "
+        "    LEFT JOIN users u ON u.id = o.user_id "
+        "    WHERE o.user_id = %s "
+        "    ORDER BY o.timestamp DESC "
+        "    LIMIT 100"
+        ") AS last_ops "
+        "ORDER BY timestamp ASC",
         (g.user["id"],),
     )
-    # datetime не сериализуется jsonify по умолчанию — приводим к строке
+    # datetime не сериализуется jsonify по умолчанию - приводим к строке
     for r in rows:
         if r["timestamp"] is not None:
             r["timestamp"] = r["timestamp"].strftime("%Y-%m-%d %H:%M:%S")
