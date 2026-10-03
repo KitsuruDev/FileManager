@@ -1,0 +1,98 @@
+services:
+  # ---------- Генератор сертификатов (одноразовый) ----------
+  cert-init:
+    image: alpine:3.20
+    container_name: fm_cert_init
+    volumes:
+      - fm_certs:/certs
+      - ./nginx/generate-certs.sh:/generate-certs.sh:ro
+    command: ["sh", "/generate-certs.sh"]
+    restart: "no"
+    networks:
+      - fm_net
+  
+  # ---------- База данных ----------
+  db:
+    image: postgres:16-alpine
+    container_name: fm_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fm_user
+      POSTGRES_PASSWORD: fm_password
+      POSTGRES_DB: filemanager
+    volumes:
+      - fm_pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    networks:
+      - fm_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fm_user -d filemanager"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------- API (общение только через прокси nginx) ----------
+  api:
+    build: ./api
+    container_name: fm_api
+    restart: unless-stopped
+    env_file: ./api/.env
+    environment:
+      DB_HOST: db
+      STORAGE_ROOT: /storage
+    volumes:
+      - fm_storage:/storage
+    networks:
+      - fm_net
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ---------- Nginx ----------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: fm_nginx
+    restart: unless-stopped
+    ports:
+      - "8443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - fm_certs:/etc/nginx/certs:ro
+    networks:
+      - fm_net
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+
+  # ---------- Клиент (запускается вручную - docker compose run --rm client) ----------
+  client:
+    build: ./client
+    container_name: fm_client
+    stdin_open: true
+    tty: true
+    environment:
+      API_URL: https://nginx
+      CA_BUNDLE: /certs/server.crt
+    volumes:
+      - fm_certs:/certs:ro
+      - ./client/uploads:/uploads:ro
+    networks:
+      - fm_net
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+      nginx:
+        condition: service_started
+    profiles:
+      - cli
+
+networks:
+  fm_net:
+    driver: bridge
+
+volumes:
+  fm_pgdata:
+  fm_certs:
+  fm_storage:

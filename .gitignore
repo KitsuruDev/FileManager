@@ -1,0 +1,45 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Виртуальные окружения ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Переменные окружения ----
+.env
+.env.local
+.env.*.local
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ---- Пользовательские файлы в хранилище ----
+api/storage/
+storage/
+client/uploads/
+uploads/
+
+# ---- Сертификаты ----
+nginx/certs/
+*.crt
+*.key
+*.pem
+
+# ---- Логи ----
+*.log
