@@ -10,8 +10,8 @@ from lxml import etree
 from app import auth
 from app.audit import log_event
 from app.file_manager import (
-    list_disks, create_file, read_file, update_file,
-    delete_file, list_files,
+    get_list_disks, create_file, read_file, update_file,
+    delete_file, get_list_files,
 )
 from app.data_formats import save_json, load_json, save_xml, load_xml
 from app.archive import create_zip, extract_zip
@@ -22,31 +22,13 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 МБ
 
 
-def _client_ip() -> str:
+def _get_client_ip() -> str:
     """
     Реальный IP клиента за nginx.
     nginx прокидывает X-Real-IP;
     fallback - remote_addr напрямую.
     """
     return (request.headers.get("X-Real-IP") or request.remote_addr or "unknown")
-
-
-# Аутентификация
-def require_auth(f):
-    """Декоратор: требует заголовок Authorization: Bearer <token>."""
-    @functools.wraps(f)
-    def wrapper(*args, **kwargs):
-        header = request.headers.get("Authorization", "")
-        if not header.startswith("Bearer "):
-            return jsonify(error="Требуется авторизация"), 401
-        token = header[7:].strip()
-        user = auth.resolve_session(token)
-        if not user:
-            return jsonify(error="Недействительный или истёкший токен"), 401
-        g.user = user
-        g.token = token
-        return f(*args, **kwargs)
-    return wrapper
 
 
 def _decode_b64(value) -> bytes:
@@ -65,9 +47,33 @@ def on_error(e):
     return jsonify(error="Внутренняя ошибка сервера"), 500
 
 
+def require_auth(f):
+    """Декоратор: требует заголовок Authorization: Bearer <token>."""
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        header = request.headers.get("Authorization", "")
+        if not header.startswith("Bearer "):
+            return jsonify(error="Требуется авторизация"), 401
+
+        token = header[7:].strip()
+        user = auth.resolve_session(token)
+        if not user:
+            return jsonify(error="Недействительный или истёкший токен"), 401
+
+        g.user = user
+        g.token = token
+
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
+
+# auth
 @app.post("/api/register")
 def register():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True) or {} # silent=True - не бросает исключение, возвращает None
     try:
         auth.register_user(
             str(data.get("username") or ""),
@@ -78,8 +84,6 @@ def register():
         return jsonify(error=str(e)), 400
 
 
-
-# auth
 @app.post("/api/login")
 def login():
     data = request.get_json(silent=True) or {}
@@ -87,7 +91,7 @@ def login():
         user = auth.authenticate(
             str(data.get("username") or ""),
             str(data.get("password") or ""),
-            ip=_client_ip(),
+            ip=_get_client_ip(),
         )
     except auth.RateLimitError as e:
         return jsonify(error=str(e)), 429
@@ -95,14 +99,19 @@ def login():
         return jsonify(error=str(e)), 401
 
     token = auth.create_session(user["id"])
-    return jsonify(token=token, username=user["username"])
+    return jsonify(token=token, username=user["username"]) # логирование успешного входа вынесено в метод authenticate
 
 
 @app.post("/api/logout")
 @require_auth
 def logout():
     auth.destroy_session(g.token)
-    log_event(g.user["id"], None, "logout", "Выход из системы")
+
+    log_event(
+        g.user["id"], None, "logout",
+        "Выход из системы"
+    )
+    
     return jsonify(status="ok")
 
 
@@ -111,20 +120,20 @@ def logout():
 @app.get("/api/disks")
 @require_auth
 def api_disks():
-    return jsonify(disks=list_disks())
+    return jsonify(disks=get_list_disks())
 
 
 @app.get("/api/files")
 @require_auth
 def api_files():
-    return jsonify(files=list_files(g.user["id"]))
+    return jsonify(files=get_list_files(g.user["id"]))
 
 
 @app.post("/api/files")
 @require_auth
 def api_create_file():
     data = request.get_json(silent=True) or {}
-    rel = str(data.get("path") or "")
+    path_string = str(data.get("path") or "")
 
     try:
         content = _decode_b64(data.get("content_b64"))
@@ -132,42 +141,42 @@ def api_create_file():
         return jsonify(error="Некорректный base64"), 400
 
     try:
-        file_id = create_file(g.user["id"], rel, content)
+        file_id = create_file(g.user["id"], path_string, content)
         return jsonify(file_id=file_id), 201
     except (ValueError, FileExistsError) as e:
         return jsonify(error=str(e)), 400
 
 
-@app.get("/api/files/<path:rel>")
+@app.get("/api/files/<path:path_string>")
 @require_auth
-def api_read_file(rel: str):
+def api_read_file(path_string: str):
     try:
-        data = read_file(g.user["id"], rel)
+        data = read_file(g.user["id"], path_string)
         return jsonify(content_b64=base64.b64encode(data).decode())
     except (ValueError, FileNotFoundError) as e:
         return jsonify(error=str(e)), 404
 
 
-@app.put("/api/files/<path:rel>")
+@app.put("/api/files/<path:path_string>")
 @require_auth
-def api_update_file(rel: str):
+def api_update_file(path_string: str):
     data = request.get_json(silent=True) or {}
     try:
         content = _decode_b64(data.get("content_b64"))
     except binascii.Error:
         return jsonify(error="Некорректный base64"), 400
     try:
-        update_file(g.user["id"], rel, content)
+        update_file(g.user["id"], path_string, content)
         return jsonify(status="ok")
     except (ValueError, FileNotFoundError) as e:
         return jsonify(error=str(e)), 404
 
 
-@app.delete("/api/files/<path:rel>")
+@app.delete("/api/files/<path:path_string>")
 @require_auth
-def api_delete_file(rel: str):
+def api_delete_file(path_string: str):
     try:
-        delete_file(g.user["id"], rel)
+        delete_file(g.user["id"], path_string)
         return jsonify(status="ok")
     except (ValueError, FileNotFoundError) as e:
         return jsonify(error=str(e)), 404
@@ -186,11 +195,11 @@ def api_save_json():
         return jsonify(error=str(e)), 400
 
 
-@app.get("/api/json/<path:rel>")
+@app.get("/api/json/<path:path_string>")
 @require_auth
-def api_load_json(rel: str):
+def api_load_json(path_string: str):
     try:
-        return jsonify(value=load_json(g.user["id"], rel))
+        return jsonify(value=load_json(g.user["id"], path_string))
     except (ValueError, FileNotFoundError) as e:
         return jsonify(error=str(e)), 404
 
@@ -202,25 +211,62 @@ def api_save_xml():
     xml_text = str(data.get("xml") or "")
     try:
         parser = etree.XMLParser(
-            resolve_entities=False, no_network=True,
-            huge_tree=False, load_dtd=False,
+            # отключение разворачивания сущностей
+            # (защита от XML External Entity (XXE) - CWE-611)
+            # 
+            # Например:
+            # <?xml version="1.0"?>
+            # <!DOCTYPE foo [
+            #   <!ENTITY xxe SYSTEM "file:///etc/passwd">
+            # ]>
+            # <root>&xxe;</root>
+            # 
+            # ссылка "file:///etc/passwd" не прочитается парсером и не вставится содержимое файла по ссылке
+            resolve_entities=False,
+
+            # запрет сетевых обращений при парсинге
+            # (защита от XXE - CWE-611)
+            no_network=True,
+
+            # отключение поддержки «гигантских» деревьев (по умолчанию у lxml потолок ~10 МБ содержимого)
+            # (защита от Billion Laughs / XML bomb (CWE-776))
+            # 
+            # Например:
+            # <!ENTITY a "aaaa...">
+            # <!ENTITY b "&a;&a;&a;...">
+            # <!ENTITY c "&b;&b;&b;...">
+            huge_tree=False,
+
+            # отключение валидации и загрузки документа DTD - только чистый XML
+            # (защита от XXE - CWE-611)
+            # 
+            # DTD - «описание структуры XML-документа», где можно объявлять сущности (переменные) и правила.
+            # Например:
+            # <!ENTITY a "aaaa...">
+            dtd_validation=False,
+            load_dtd=False
+
+            # Таким образом ни содержимое локальных файлов, ни внешние ресурсы открыты не будут 
         )
-        root = etree.fromstring(xml_text.encode("utf-8"), parser=parser)
+
+        user_folder = etree.fromstring(xml_text.encode("utf-8"), parser=parser)
+
     except etree.XMLSyntaxError as e:
         return jsonify(error=f"Некорректный XML: {e}"), 400
+    
     try:
-        save_xml(g.user["id"], str(data.get("path") or ""), root)
+        save_xml(g.user["id"], str(data.get("path") or ""), user_folder)
         return jsonify(status="ok"), 201
     except (ValueError, FileExistsError) as e:
         return jsonify(error=str(e)), 400
 
 
-@app.get("/api/xml/<path:rel>")
+@app.get("/api/xml/<path:path_string>")
 @require_auth
-def api_load_xml(rel: str):
+def api_load_xml(path_string: str):
     try:
-        root = load_xml(g.user["id"], rel)
-        return jsonify(xml=etree.tostring(root, encoding="unicode"))
+        user_folder = load_xml(g.user["id"], path_string)
+        return jsonify(xml=etree.tostring(user_folder, encoding="unicode"))
     except (ValueError, FileNotFoundError) as e:
         return jsonify(error=str(e)), 404
 
@@ -264,17 +310,16 @@ def health():
     return jsonify(status="ok")
 
 
+
 # audit
 @app.get("/api/audit")
 @require_auth
 def api_audit():
     """
     Журнал аудита пользователя.
-    JOIN с users, чтобы видеть, кто сделал операцию
-    (user_id хранится в operations, username - в users).
+    JOIN с users, чтобы видеть, кто сделал операцию (user_id хранится в operations, username - в users).
 
-    Берём последние 100 записей (самые свежие), но выводим их
-    в хронологическом порядке - от старых к новым.
+    Взятие последних 100 записей (самые свежие), но вывод их в хронологическом порядке - от старых к новым.
     """
     rows = fetch_all(
         "SELECT * FROM ("
@@ -288,8 +333,10 @@ def api_audit():
         "ORDER BY timestamp ASC",
         (g.user["id"],),
     )
-    # datetime не сериализуется jsonify по умолчанию - приводим к строке
+
+    # datetime не сериализуется jsonify по умолчанию - приводится к строке
     for r in rows:
         if r["timestamp"] is not None:
             r["timestamp"] = r["timestamp"].strftime("%Y-%m-%d %H:%M:%S")
+    
     return jsonify(operations=rows)

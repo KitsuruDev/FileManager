@@ -2,6 +2,7 @@
 
 Клиент-серверное приложение для управления файлами с акцентом на безопасность. Закрывает типовые уязвимости из CWE: SQL-инъекции, path traversal, XXE, zip-slip, перебор паролей, cleartext-трафик, слабое хеширование и др.
 
+
 ## Архитектура
 
 ```mermaid
@@ -24,10 +25,12 @@ flowchart LR
 - **db** - PostgreSQL 16
 - **cert-init** - одноразовый контейнер, генерирует self-signed сертификаты
 
+
 ## Требования
 
 - Docker Desktop (Windows/Mac) или Docker + Docker Compose (Linux)
 - Свободный порт `8443` на хосте
+
 
 ## Быстрый старт
 
@@ -48,6 +51,7 @@ docker compose ps
 docker compose run --rm client
 ```
 
+
 ## Первый запуск
 
 В клиенте:
@@ -60,6 +64,7 @@ docker compose run --rm client
 ```
 
 Выберите `2`, создайте учётную запись (username 3–50 символов, пароль ≥ 8 символов), затем войдите под ней.
+
 
 ## Команды клиента
 
@@ -77,6 +82,7 @@ docker compose run --rm client
 | 10 | Журнал аудита | Только свои действия |
 | 0 | Выход | - |
 
+
 ## Загрузка файлов с хоста
 
 Файлы из папки `./client/uploads` на хосте доступны клиенту как `/uploads/...`. Пример:
@@ -93,6 +99,7 @@ echo '{"from": "host"}' > client\uploads\config.json
 Путь на сервере: docs/config.json
 ```
 
+
 ## Проверка безопасности
 
 ```bash
@@ -105,6 +112,7 @@ echo '{"from": "host"}' > client\uploads\config.json
 # Проверить HTTPS:
 curl -k https://localhost:8443/api/health
 ```
+
 
 ## Сборка после изменений
 
@@ -119,6 +127,7 @@ docker compose build client && docker compose run --rm client
 docker compose up -d --build
 ```
 
+
 ## Полный сброс
 
 ```bash
@@ -129,6 +138,7 @@ docker compose up -d --build
 
 Volume `fm_pgdata` (БД) и `fm_storage` (файлы пользователей) будут пересозданы с нуля.
 
+
 ## Просмотр логов
 
 ```bash
@@ -137,6 +147,7 @@ docker compose logs -f nginx      # reverse-proxy
 docker compose logs db            # БД
 docker compose logs cert-init     # генерация сертификатов
 ```
+
 
 ## Доступ к БД
 
@@ -154,21 +165,29 @@ SELECT * FROM login_attempts ORDER BY id DESC;       -- rate limit
 
 ## Применённые защиты (CWE)
 
-| CWE | Уязвимость | Где закрыта |
-|---|---|---|
-| CWE-89 | SQL-инъекция | параметризованные запросы в `db.py` |
-| CWE-916 | Слабое хеширование | bcrypt cost 12 в `auth.py` |
-| CWE-307 | Перебор паролей | rate limit по IP, `login_attempts` |
-| CWE-204 | User enumeration | фиктивный bcrypt, единый ответ |
-| CWE-319 | Cleartext transmission | HTTPS через nginx |
-| CWE-22 | Path traversal | `_safe_path` + домашние директории |
-| CWE-22 | Zip-slip | проверка каждого элемента в `archive.py` |
-| CWE-611 | XXE | `lxml` с `resolve_entities=False` |
-| CWE-776 | Billion Laughs | `huge_tree=False` |
-| CWE-502 | Unpickle | только `json`/`lxml` |
-| CWE-639 | Доступ к чужим файлам | `_owned_file_id` + изоляция по `<user_id>` |
-| CWE-352 | CSRF | Bearer-токен в заголовке, не в cookie |
-| CWE-209 | Утечка через ошибки | единый `@app.errorhandler` |
+| CWE | Название | Уязвимость | Где закрыта |
+|---|---|---|---|
+| **22** | Improper Limitation of a Pathname to a Restricted Directory | Path traversal, zip-slip | `file_manager._get_safe_path` (домашние директории + `is_relative_to`); `archive.extract_zip` (проверка каждого элемента) |
+| **59** | Improper Link Resolution Before File Access | Симлинки наружу | `file_manager._get_safe_path` (`resolve()` + проверка префикса) |
+| **79** | Improper Neutralization of Input During Web Page Generation | XSS | Только JSON-ответы, никакого HTML и inline-вставок (`api.py`) |
+| **89** | Improper Neutralization of Special Elements used in an SQL Command | SQL-инъекция | Параметризованные запросы (`db.py`) |
+| **204** | Observable Response Discrepancy | User enumeration по ответу | Единое сообщение «Неверное имя пользователя или пароль» (`auth.py`) |
+| **208** | Observable Timing Discrepancy | User enumeration по таймингу | Фиктивный `bcrypt.hashpw` для несуществующих username (`auth.py`) |
+| **209** | Generation of Error Message Containing Sensitive Information | Утечка через ошибки | Единый `@app.errorhandler` в `api.py`, без стектрейсов и деталей БД |
+| **307** | Improper Restriction of Excessive Authentication Attempts | Перебор паролей | Rate limit по IP через таблицу `login_attempts` (`auth.py`) |
+| **319** | Cleartext Transmission of Sensitive Information | Открытый трафик | HTTPS через nginx, HTTP → HTTPS редирект (`nginx.conf`) |
+| **326** | Inadequate Encryption Strength | Слабые шифры | `ssl_ciphers HIGH:!aNULL:!MD5`, `TLSv1.2 TLSv1.3` (`nginx.conf`) |
+| **327** | Use of a Broken or Risky Cryptographic Algorithm | Устаревшие алгоритмы | Отключены SSLv3, TLS 1.0/1.1; MD5 исключён (`nginx.conf`) |
+| **352** | Cross-Site Request Forgery | CSRF | Bearer-токен в заголовке `Authorization`, не в cookie (`api.py`) |
+| **430** | Deployment of Wrong Handler | MIME sniffing | `X-Content-Type-Options: nosniff` (`nginx.conf`) |
+| **502** | Deserialization of Untrusted Data | Unpickle | Только `json` и `lxml`, никакого `pickle`/`yaml.load` (`data_formats.py`) |
+| **611** | Improper Restriction of XML External Entity Reference | XXE | `resolve_entities=False`, `no_network=True`, `load_dtd=False` (`data_formats.py`) |
+| **639** | Authorization Bypass Through User-Controlled Key | Доступ к чужим файлам | `_get_owned_file_id` + изоляция по `<user_id>` (`file_manager.py`, `archive.py`) |
+| **693** | Protection Mechanism Failure | Отсутствие HSTS | `Strict-Transport-Security: max-age=31536000` (`nginx.conf`) |
+| **776** | Improper Restriction of Recursive Entity References | Billion Laughs (XML bomb) | `huge_tree=False` (`data_formats.py`) |
+| **916** | Use of Password Hash With Insufficient Computational Effort | Слабое хеширование (MD5/SHA1) | `bcrypt` cost 12 (`auth.py`) |
+| **1021** | Improper Restriction of Rendered UI Layers or Frames | Clickjacking | `X-Frame-Options: DENY` (`nginx.conf`) |
+
 
 ## Остановка
 

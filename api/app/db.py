@@ -6,8 +6,7 @@
 import os, contextlib, psycopg2, psycopg2.extras
 from dotenv import load_dotenv, find_dotenv
 
-# .env лежит в api/.env; find_dotenv() найдёт его при локальном запуске,
-# в контейнере переменные и так приходят из docker-compose (env_file)
+# .env лежит в api/.env
 load_dotenv(find_dotenv())
 
 
@@ -54,9 +53,7 @@ def transaction():
 
 def fetch_one(query: str, params: tuple = ()) -> dict | None:
     """Одна строка как dict. Всегда через параметры"""
-    with get_conn() as conn, conn.cursor(
-        cursor_factory=psycopg2.extras.RealDictCursor
-    ) as cur:
+    with get_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(query, params)
         row = cur.fetchone()
         return dict(row) if row else None
@@ -64,9 +61,7 @@ def fetch_one(query: str, params: tuple = ()) -> dict | None:
 
 def fetch_all(query: str, params: tuple = ()) -> list[dict]:
     """Все строки как список dict"""
-    with get_conn() as conn, conn.cursor(
-        cursor_factory=psycopg2.extras.RealDictCursor
-    ) as cur:
+    with get_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(query, params)
         return [dict(r) for r in cur.fetchall()]
 

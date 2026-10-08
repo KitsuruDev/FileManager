@@ -25,18 +25,18 @@ STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "./storage")).resolve()
 STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-def _user_root(user_id: int) -> Path:
+def _get_user_folder(user_id: int) -> Path:
     """
     Домашняя директория пользователя: /storage/users/<user_id>/
     Создаётся при первом обращении.
     """
-    root = (STORAGE_ROOT / "users" / str(user_id)).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    user_folder = (STORAGE_ROOT / "users" / str(user_id)).resolve()
+    user_folder.mkdir(parents=True, exist_ok=True)
+    return user_folder
 
 
 # Диски
-def list_disks() -> list[dict]:
+def get_list_disks() -> list[dict]:
     """Список локальных накопителей и их свойства"""
 
     disks = []
@@ -45,10 +45,12 @@ def list_disks() -> list[dict]:
         # Пропускаем bind-mount отдельных файлов (resolv.conf, hosts и т.п.)
         if not os.path.isdir(part.mountpoint):
             continue
+
         try:
             usage = psutil.disk_usage(part.mountpoint)
         except (PermissionError, OSError):
             continue
+        
         disks.append({
             "device":      part.device,
             "mountpoint":  part.mountpoint,
@@ -63,32 +65,32 @@ def list_disks() -> list[dict]:
 
 
 # Безопасные пути (CWE-22)
-def _safe_path(user_id: int, relative: str) -> Path:
+def _get_safe_path(user_id: int, path: str) -> Path:
     """
     Приводит пользовательский путь к абсолютному внутри домашней директории
     пользователя. Бросает ValueError, если путь выходит за её пределы.
     """
 
     # Убираем ведущие слеши: "/docs/x.txt" и "docs/x.txt" - одно и то же.
-    # Иначе Path(root) / "/docs/x.txt" даст абсолютный "/docs/x.txt" (POSIX),
+    # Иначе Path(user_folder) / "/docs/x.txt" даст абсолютный "/docs/x.txt" (POSIX),
     # и проверка is_relative_to справедливо отбросит запрос.
-    relative = relative.strip().lstrip("/")
+    path = path.strip().lstrip("/")
 
-    if not relative:
+    if not path:
         raise ValueError("Пустой путь.")
 
-    root = _user_root(user_id)
-    candidate = (root / relative).resolve()
+    user_folder = _get_user_folder(user_id)
+    candidate = (user_folder / path).resolve()
 
     # Защита от ../../ и от симлинков наружу
-    if not candidate.is_relative_to(root):
+    if not candidate.is_relative_to(user_folder):
         raise ValueError("Путь выходит за пределы хранилища.")
 
     return candidate
 
 
 # Контроль доступа (CWE-639)
-def _owned_file_id(user_id: int, path: Path) -> int | None:
+def _get_owned_file_id(user_id: int, path: Path) -> int | None:
     """
     Вернуть id файла, если он принадлежит пользователю, иначе None.
     Чужой файл с точки зрения вызывающего кода неотличим от несуществующего.
@@ -101,21 +103,21 @@ def _owned_file_id(user_id: int, path: Path) -> int | None:
 
 
 # CRUD файлов
-def create_file(user_id: int, relative: str, content: bytes) -> int:
+def create_file(user_id: int, path: str, content: bytes) -> int:
     """
     Создание файла. Фиксирует событие create.
 
     Порядок операций:
-      1. Записать файл на диск (легко откатить через unlink).
-      2. В одной транзакции: INSERT в files + INSERT в operations.
-      3. Если БД упала - удалить файл с диска.
+      1. Запись файла на диск (легко откатить через unlink).
+      2. В одной транзакции: INSERT в files + INSERT в operations (log_event)
+      3. Если БД упала, то удаляет файл с диска.
     """
 
-    path = _safe_path(user_id, relative)
+    path = _get_safe_path(user_id, path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if path.exists():
-        raise FileExistsError(f"Файл уже существует: {relative}")
+        raise FileExistsError(f"Файл уже существует: {path}")
 
     # 1. Диск
     path.write_bytes(content)
@@ -130,8 +132,11 @@ def create_file(user_id: int, relative: str, content: bytes) -> int:
             )
             file_id = cur.fetchone()["id"]
 
-            log_event(user_id, file_id, "create",
-                      f"Создан файл {relative} ({len(content)} байт)", cur=cur)
+            log_event(
+                user_id, file_id, "create",
+                f"Создан файл {path} ({len(content)} байт)",
+                cur=cur
+            )
     except Exception:
         # 3. Компенсация: если БД не сохранила запись, файл на диске не нужен
         path.unlink(missing_ok=True)
@@ -140,42 +145,44 @@ def create_file(user_id: int, relative: str, content: bytes) -> int:
     return file_id
 
 
-def read_file(user_id: int, relative: str) -> bytes:
+def read_file(user_id: int, path: str) -> bytes:
     """Чтение файла. Фиксирует событие read"""
 
-    path = _safe_path(user_id, relative)
+    path = _get_safe_path(user_id, path)
     if not path.is_file():
-        raise FileNotFoundError(relative)
+        raise FileNotFoundError(path)
 
     # Проверяем, что файл принадлежит пользователю
-    file_id = _owned_file_id(user_id, path)
+    file_id = _get_owned_file_id(user_id, path)
     if file_id is None:
-        raise FileNotFoundError(relative)
+        raise FileNotFoundError(path)
 
     data = path.read_bytes()
 
-    log_event(user_id, file_id, "read",
-              f"Прочитан файл {relative} ({len(data)} байт)")
+    log_event(
+        user_id, file_id, "read",
+        f"Прочитан файл {path} ({len(data)} байт)"
+    )
 
     return data
 
 
-def update_file(user_id: int, relative: str, content: bytes) -> None:
+def update_file(user_id: int, path: str, content: bytes) -> None:
     """
     Перезапись файла. Фиксирует modify.
-
-    При сбое БД восстанавливаем прежнее содержимое файла.
+    
+    При сбое БД восстанавливает прежнее содержимое файла.
     """
 
-    path = _safe_path(user_id, relative)
+    path = _get_safe_path(user_id, path)
     if not path.is_file():
-        raise FileNotFoundError(relative)
+        raise FileNotFoundError(path)
 
-    file_id = _owned_file_id(user_id, path)
+    file_id = _get_owned_file_id(user_id, path)
     if file_id is None:
-        raise FileNotFoundError(relative)
+        raise FileNotFoundError(path)
 
-    # Запоминаем старое содержимое - понадобится для отката
+    # запоминание старого содержимого для отката
     old_content = path.read_bytes()
 
     # 1. Диск
@@ -188,32 +195,33 @@ def update_file(user_id: int, relative: str, content: bytes) -> None:
                 "UPDATE files SET size = %s WHERE id = %s",
                 (len(content), file_id),
             )
-            log_event(user_id, file_id, "modify",
-                      f"Изменён файл {relative} ({len(content)} байт)", cur=cur)
+            log_event(
+                user_id, file_id, "modify",
+                f"Изменён файл {path} ({len(content)} байт)",
+                cur=cur
+            )
     except Exception:
-        # 3. Компенсация: возвращаем прежнее содержимое
+        # 3. Компенсация: возврат прежнего содержимого
         path.write_bytes(old_content)
         raise
 
 
-def delete_file(user_id: int, relative: str) -> None:
+def delete_file(user_id: int, path: str) -> None:
     """
     Удаление файла и записи из БД. Фиксирует delete.
 
-    При сбое БД восстанавливаем удалённый файл из памяти.
+    При сбое БД восстанавливает удалённый файл из памяти.
 
-    NB: log_event вызывается с file_id=None, потому что строка в files
-    уже удалена и FK-констрейнт operations.file_id -> files.id
-    не пропустит ссылку на несуществующий id.
+    
     """
 
-    path = _safe_path(user_id, relative)
+    path = _get_safe_path(user_id, path)
     if not path.is_file():
-        raise FileNotFoundError(relative)
+        raise FileNotFoundError(path)
 
-    file_id = _owned_file_id(user_id, path)
+    file_id = _get_owned_file_id(user_id, path)
     if file_id is None:
-        raise FileNotFoundError(relative)
+        raise FileNotFoundError(path)
 
     # Запоминаем содержимое - понадобится для отката
     old_content = path.read_bytes()
@@ -225,15 +233,22 @@ def delete_file(user_id: int, relative: str) -> None:
     try:
         with transaction() as cur:
             cur.execute("DELETE FROM files WHERE id = %s", (file_id,))
-            log_event(user_id, None, "delete",
-                      f"Удалён файл {relative}", cur=cur)
+
+            # Вызывается с file_id=None, потому что строка в files уже удалена.
+            # Ключ связывает таблицы operations и files по file_id и id.
+            # Он не пропустит ссылку на несуществующий id, поэтому None.
+            log_event(
+                user_id, None, "delete",
+                f"Удалён файл {path}",
+                cur=cur
+            )
     except Exception:
-        # 3. Компенсация: восстанавливаем файл
+        # 3. Компенсация: восстановление файла
         path.write_bytes(old_content)
         raise
 
 
-def list_files(user_id: int) -> list[dict]:
+def get_list_files(user_id: int) -> list[dict]:
     """
     Все файлы пользователя.
     Возвращает относительный путь от корня пользователя, сортирует по алфавиту.
@@ -245,12 +260,13 @@ def list_files(user_id: int) -> list[dict]:
         (user_id,),
     )
 
-    root = _user_root(user_id)
+    user_folder = _get_user_folder(user_id)
     for r in rows:
         try:
-            r["path"] = str(Path(r["location"]).relative_to(root))
+            # для каждой строки из БД вычисляется путь относительно домашней директории пользователя
+            r["path"] = str(Path(r["location"]).relative_to(user_folder))
         except ValueError:
-            # На случай «осиротевших» записей после старых версий кода
+            # если пути нет (очень редкие случаи)
             r["path"] = r["filename"]
 
     rows.sort(key=lambda r: r["path"].lower())
