@@ -10,6 +10,7 @@
 
 import os, base64, json, requests
 from getpass import getpass
+from pathlib import Path
 from urllib.parse import quote
 
 
@@ -86,7 +87,7 @@ def _encode_text(s: str) -> bytes:
 
 def _check_file_format(path: str) -> str:
     """Определяет формат по расширению: 'json', 'xml' или 'raw'."""
-    
+
     path = path.lower().strip()
 
     if path.endswith(".json"):
@@ -101,7 +102,7 @@ def _check_file_format(path: str) -> str:
 def _is_binary(data: bytes) -> bool:
     """
     Возвращает True, когда файл бинарный.
-    
+
     Если в первых 8 КБ есть нулевые байты или содержимое не декодируется как UTF-8, то файл бинарный.
     """
 
@@ -109,7 +110,7 @@ def _is_binary(data: bytes) -> bool:
 
     if b"\x00" in sample:
         return True
-    
+
     try:
         sample.decode("utf-8")
         return False
@@ -143,14 +144,22 @@ class ApiClient:
             data = response.json()
         except ValueError:
             data = {"error": response.text[:200]}
-        
+
         return response.status_code, data
 
 
     @staticmethod
     def _normalize_path(path: str) -> str:
-        """Убирает ведущие слеши из пользовательского пути."""
-        return path.strip().lstrip("/")
+        """
+        Убирает ведущие слеши из пользовательского пути и вычищает суррогаты, которые
+        иногда приходят из Windows-консоли. 
+        
+        Без очистки quote(), где применяется метод, упадёт с UnicodeEncodeError.
+        """
+        # encode(errors="ignore") убирает суррогатные символы (их нельзя закодировать в UTF-8)
+        # decode(errors="replace") - если что-то осталось
+        cleaned = path.encode("utf-8", errors="ignore").decode("utf-8", errors="replace")
+        return cleaned.strip().lstrip("/")
 
 
     def health(self):
@@ -200,10 +209,10 @@ class ApiClient:
         path_string = quote(self._normalize_path(path), safe="/")
 
         code, data = self._call("GET", f"/api/files/{path_string}")
-        
+
         if code == 200:
             data["content"] = base64.b64decode(data["content_b64"])
-        
+
         return code, data
 
 
@@ -213,11 +222,11 @@ class ApiClient:
         return self._call("PUT", f"/api/files/{path_string}", json={
             "content_b64": base64.b64encode(content).decode(),
         })
-    
+
 
     def delete_file(self, path: str):
         path_string = quote(self._normalize_path(path), safe="/")
-        
+
         return self._call("DELETE", f"/api/files/{path_string}")
 
 
@@ -256,7 +265,7 @@ def cmd_get_disks(api: ApiClient, _username: str):
     if not disks:
         print("  (нет доступных накопителей)")
         return
-    
+
     for d in disks:
         print(f"  {d['device']} ({d['fstype']}) на {d['mountpoint']}")
         print(f"    Всего:  {cmd_get_human_file_size(d['total'])}")
@@ -266,11 +275,11 @@ def cmd_get_disks(api: ApiClient, _username: str):
 def cmd_get_files(api: ApiClient, _username: str):
     data = _check_response_code(api.get_files())
     files = data.get("files", [])
-    
+
     if not files:
         print("  (пусто)")
         return
-    
+
     for f in files:
         print(f"  {f['path']:<40}  {cmd_get_human_file_size(f['size']):>10}  {f['created_at']}")
 
@@ -300,13 +309,13 @@ def cmd_create_file(api: ApiClient, _username: str):
 
     if file_format == "json":
         raw = input("JSON-строка: ")
-        
+
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError as e:
             print(f"\n[!] Некорректный JSON: {e}")
             return
-        
+
         _check_response_code(api.save_json(path_string, obj))
         print("\n  [+] JSON создан")
 
@@ -353,7 +362,7 @@ def cmd_upload_file(api: ApiClient, _username: str):
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
             print(f"\n[!] Файл не является корректным JSON: {e}")
             return
-        
+
         _check_response_code(api.save_json(remote, obj))
         print(f"\n  [+] JSON загружен ({len(content)} байт)")
 
@@ -363,7 +372,7 @@ def cmd_upload_file(api: ApiClient, _username: str):
         except UnicodeDecodeError as e:
             print(f"\n[!] XML должен быть в UTF-8: {e}")
             return
-        
+
         _check_response_code(api.save_xml(remote, text))
         print(f"\n  [+] XML загружен ({len(content)} байт)")
 
@@ -376,9 +385,18 @@ def cmd_read_file(api: ApiClient, _username: str):
     """Чтение файла. Бинарные файлы (ZIP, PDF и т.п.) не отображаются."""
 
     path_string = input("Путь: ").strip()
+
+    # быстрая проверка по расширению - не отправляется запрос на сервер для бинарника
+    if _is_binary_extension(path_string):
+        print(f"\n  [бинарный файл '{path_string}', не отображается]")
+        if path_string.lower().endswith(".zip"):
+            print("  Для работы с ZIP используйте команду 9 «Распаковать ZIP».")
+        return
+
     data = _check_response_code(api.read_file(path_string))
     content = data["content"]
 
+    # вторая проверка - по содержимому (на случай, если расширение обмануто)
     if _is_binary(content):
         print(f"\n  [двоичный файл, {len(content)} байт]")
         return
@@ -414,7 +432,7 @@ def cmd_update_file(api: ApiClient, _username: str):
         except json.JSONDecodeError as e:
             print(f"\n[!] Некорректный JSON: {e}")
             return
-        
+
         text = json.dumps(obj, ensure_ascii=False, indent=2)
         _check_response_code(api.update_file(path_string, _encode_text(text)))
         print("\n  [+] JSON обновлён")
@@ -438,8 +456,21 @@ def cmd_delete_file(api: ApiClient, _username: str):
 
 def cmd_create_zip(api: ApiClient, _username: str):
     archive = input("Путь к архиву (например backup.zip, docs/backup.zip, /docs/backup.zip): ").strip()
+    if not archive:
+        print("\n[!] Пустой путь.")
+        return
+
+    # расширение архива - только .zip
+    if not archive.lower().endswith(".zip"):
+        print("\n[!] Архив должен иметь расширение .zip.")
+        return
+
     files_s = input("Путь к каждому файлу для архивации, через запятую: ")
     files = [f.strip() for f in files_s.split(",") if f.strip()]
+    if not files:
+        print("\n[!] Не указано ни одного файла для архивации.")
+        return
+
     _check_response_code(api.create_zip(archive, files))
     print("\n  [+] Архив создан")
 
@@ -458,7 +489,7 @@ def cmd_audit(api: ApiClient, _username: str):
     if not operations:
         print("  (журнал пуст)")
         return
-    
+
     for operation in operations:
         ts = operation.get("timestamp") or "-"
         who = operation.get("username") or "?"
@@ -489,7 +520,7 @@ def show_menu(api: ApiClient, username: str):
 
         for key, (label, _) in MENU.items():
             print(f"  {key}. {label}")
-        
+
         choice = input("\nВыберите команду: ").strip()
 
         if choice == "0":
@@ -529,7 +560,7 @@ def main():
 
         if choice == "0":
             return
-        
+
         elif choice == "1":
             u = input("Логин: ").strip()
             p = getpass("Пароль: ")
@@ -541,7 +572,7 @@ def main():
                 show_menu(api, data["username"])
             else:
                 print(f"\n[!] {data.get('error')}")
-        
+
         elif choice == "2":
             u = input("Логин: ").strip()
             p = getpass("Пароль: ")

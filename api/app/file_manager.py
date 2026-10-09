@@ -113,11 +113,13 @@ def create_file(user_id: int, path: str, content: bytes) -> int:
       3. Если БД упала, то удаляет файл с диска.
     """
 
+    user_path = path
+
     path = _get_safe_path(user_id, path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if path.exists():
-        raise FileExistsError(f"Файл уже существует: {path}")
+        raise FileExistsError(f"Файл уже существует: {user_path}")
 
     # 1. Диск
     path.write_bytes(content)
@@ -134,7 +136,7 @@ def create_file(user_id: int, path: str, content: bytes) -> int:
 
             log_event(
                 user_id, file_id, "create",
-                f"Создан файл {path} ({len(content)} байт)",
+                f"Создан файл {user_path} ({len(content)} байт)",
                 cur=cur
             )
     except Exception:
@@ -148,20 +150,23 @@ def create_file(user_id: int, path: str, content: bytes) -> int:
 def read_file(user_id: int, path: str) -> bytes:
     """Чтение файла. Фиксирует событие read"""
 
+    # сохранение исходного пользовательского пути для отображения в сообщении об ошибке
+    user_path = path
+
     path = _get_safe_path(user_id, path)
     if not path.is_file():
-        raise FileNotFoundError(path)
+        raise FileNotFoundError(user_path)
 
     # Проверяем, что файл принадлежит пользователю
     file_id = _get_owned_file_id(user_id, path)
     if file_id is None:
-        raise FileNotFoundError(path)
+        raise FileNotFoundError(user_path)
 
     data = path.read_bytes()
 
     log_event(
         user_id, file_id, "read",
-        f"Прочитан файл {path} ({len(data)} байт)"
+        f"Прочитан файл {user_path} ({len(data)} байт)"
     )
 
     return data
@@ -170,17 +175,19 @@ def read_file(user_id: int, path: str) -> bytes:
 def update_file(user_id: int, path: str, content: bytes) -> None:
     """
     Перезапись файла. Фиксирует modify.
-    
+
     При сбое БД восстанавливает прежнее содержимое файла.
     """
 
+    user_path = path
+
     path = _get_safe_path(user_id, path)
     if not path.is_file():
-        raise FileNotFoundError(path)
+        raise FileNotFoundError(user_path)
 
     file_id = _get_owned_file_id(user_id, path)
     if file_id is None:
-        raise FileNotFoundError(path)
+        raise FileNotFoundError(user_path)
 
     # запоминание старого содержимого для отката
     old_content = path.read_bytes()
@@ -197,7 +204,7 @@ def update_file(user_id: int, path: str, content: bytes) -> None:
             )
             log_event(
                 user_id, file_id, "modify",
-                f"Изменён файл {path} ({len(content)} байт)",
+                f"Изменён файл {user_path} ({len(content)} байт)",
                 cur=cur
             )
     except Exception:
@@ -215,13 +222,15 @@ def delete_file(user_id: int, path: str) -> None:
     
     """
 
+    user_path = path
+
     path = _get_safe_path(user_id, path)
     if not path.is_file():
-        raise FileNotFoundError(path)
+        raise FileNotFoundError(user_path)
 
     file_id = _get_owned_file_id(user_id, path)
     if file_id is None:
-        raise FileNotFoundError(path)
+        raise FileNotFoundError(user_path)
 
     # Запоминаем содержимое - понадобится для отката
     old_content = path.read_bytes()
@@ -239,7 +248,7 @@ def delete_file(user_id: int, path: str) -> None:
             # Он не пропустит ссылку на несуществующий id, поэтому None.
             log_event(
                 user_id, None, "delete",
-                f"Удалён файл {path}",
+                f"Удалён файл {user_path}",
                 cur=cur
             )
     except Exception:
