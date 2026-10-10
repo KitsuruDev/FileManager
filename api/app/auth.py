@@ -123,7 +123,7 @@ def authenticate(username: str, password: str, ip: str) -> dict:
     #    (CWE-204 - Observable Response Discrepancy - чётко пишется, что username есть)
     #    (CWE-208 - Observable Timing Discrepancy - разное время ответа)
     if row is None:
-        bcrypt.hashpw(b"dummy", bcrypt.gensalt(rounds=BCRYPT_ROUNDS))
+        bcrypt.hashpw(b"dummmmmy", bcrypt.gensalt(rounds=BCRYPT_ROUNDS))
         _write_failed_attempt(ip, username)
         raise AuthError("Неверное имя пользователя или пароль.")
 
