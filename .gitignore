@@ -37,9 +37,11 @@ uploads/
 
 # ---- Сертификаты ----
 nginx/certs/
+certs/
 *.crt
 *.key
 *.pem
 
 # ---- Логи ----
 *.log
+*.txt

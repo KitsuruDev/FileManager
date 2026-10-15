@@ -1,0 +1,88 @@
+stages:
+  - certs
+  - build
+
+# пайплайн запускается ТОЛЬКО при создании тега
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: always
+    - when: never
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_BUILDKIT: "1"
+
+# генерация сертификатов для nginx
+generate-certs:
+  stage: certs
+  image: alpine:3.20
+  rules:
+    - if: $CI_COMMIT_TAG
+  before_script:
+    - apk add --no-cache openssl
+  script:
+    - mkdir -p certs
+    - |
+      openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout certs/server.key \
+        -out certs/server.crt \
+        -subj "/CN=nginx" \
+        -addext "subjectAltName=DNS:nginx,DNS:localhost,IP:127.0.0.1"
+    - chmod 600 certs/server.key
+    - ls -la certs/
+  artifacts:
+    paths:
+      - certs/
+    expire_in: 1 week
+
+# сборка API
+build-api:
+  stage: build
+  image: docker:24-cli
+  services:
+    - docker:24-dind
+  rules:
+    - if: $CI_COMMIT_TAG
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_TAG" -t "$CI_REGISTRY_IMAGE/api:latest" ./api
+    - docker push "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_TAG"
+    - docker push "$CI_REGISTRY_IMAGE/api:latest"
+
+# сборка клиента
+build-client:
+  stage: build
+  image: docker:24-cli
+  services:
+    - docker:24-dind
+  rules:
+    - if: $CI_COMMIT_TAG
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE/client:$CI_COMMIT_TAG" -t "$CI_REGISTRY_IMAGE/client:latest" ./client
+    - docker push "$CI_REGISTRY_IMAGE/client:$CI_COMMIT_TAG"
+    - docker push "$CI_REGISTRY_IMAGE/client:latest"
+
+# сборка Nginx (с сертификатами из generate-certs)
+build-nginx:
+  stage: build
+  image: docker:24-cli
+  services:
+    - docker:24-dind
+  needs:
+    - job: generate-certs
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - mkdir -p nginx/certs
+    - cp certs/server.crt certs/server.key nginx/certs/
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE/nginx:$CI_COMMIT_TAG" -t "$CI_REGISTRY_IMAGE/nginx:latest" ./nginx
+    - docker push "$CI_REGISTRY_IMAGE/nginx:$CI_COMMIT_TAG"
+    - docker push "$CI_REGISTRY_IMAGE/nginx:latest"
