@@ -1,4 +1,16 @@
 services:
+  # генератор сертификатов (одноразовый)
+  cert-init:
+    image: alpine:3.20
+    container_name: fm_cert_init
+    volumes:
+      - fm_certs:/certs
+      - ./nginx/generate-certs.sh:/generate-certs.sh:ro
+    command: ["sh", "/generate-certs.sh"]
+    restart: "no"
+    networks:
+      - fm_net
+
   # postgres - официальный образ
   db:
     image: postgres:16-alpine
@@ -21,7 +33,7 @@ services:
 
   # api - из registry
   api:
-    image: registry.gitlab.com/KitsuruDev/filemanager/api:v1.0.0
+    image: registry.gitlab.com/kitsurudev/filemanager/api:v1.0.0
     container_name: fm_api
     restart: unless-stopped
     env_file: ./api/.env
@@ -36,34 +48,42 @@ services:
       db:
         condition: service_healthy
 
-  # nginx - из registry (сертификаты уже внутри образа)
+  # nginx - из registry, сертификаты монтируются из volume
   nginx:
-    image: registry.gitlab.com/KitsuruDev/filemanager/nginx:v1.0.0
+    image: registry.gitlab.com/kitsurudev/filemanager/nginx:v1.0.0
     container_name: fm_nginx
     restart: unless-stopped
     ports:
       - "8443:443"
+    volumes:
+      - fm_certs:/etc/nginx/certs:ro
     networks:
       - fm_net
     depends_on:
-      - api
+      cert-init:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
 
   # client - из registry
   client:
-    image: registry.gitlab.com/KitsuruDev/filemanager/client:v1.0.0
+    image: registry.gitlab.com/kitsurudev/filemanager/client:v1.0.0
     container_name: fm_client
     stdin_open: true
     tty: true
     environment:
       API_URL: https://nginx
-      CA_BUNDLE: /etc/nginx/certs/server.crt
+      CA_BUNDLE: /certs/server.crt
     volumes:
-      - fm_certs_internal:/certs:ro
+      - fm_certs:/certs:ro
       - ./client/uploads:/uploads:ro
     networks:
       - fm_net
     depends_on:
-      - nginx
+      cert-init:
+        condition: service_completed_successfully
+      nginx:
+        condition: service_started
     profiles:
       - cli
 
@@ -73,5 +93,5 @@ networks:
 
 volumes:
   fm_pgdata:
+  fm_certs:
   fm_storage:
-  fm_certs_internal:

@@ -30,9 +30,10 @@ flowchart LR
 
 - Docker Desktop (Windows/Mac) или Docker + Docker Compose (Linux)
 - Свободный порт `8443` на хосте
+- Аккаунт GitLab (для CI/CD)
 
 
-## Быстрый старт
+## Быстрый старт (локальная сборка)
 
 ```bash
 # 1. Клонировать репозиторий
@@ -114,7 +115,133 @@ curl -k https://localhost:8443/api/health
 ```
 
 
-## Сборка после изменений
+---
+
+## CI/CD (GitLab)
+
+Пайплайн собирает три Docker-образа (`api`, `client`, `nginx`) и пушит их в **GitLab Container Registry**. Запускается **только по тегу** - обычные коммиты и ветки не триггерят сборку.
+
+### Структура
+
+- **`.gitlab-ci.yml`** - описание пайплайна (в корне репозитория).
+- **`nginx/Dockerfile`** - свой Dockerfile для nginx (копирует конфиг, без сертификатов - они генерируются при поднятии контейнеров через `docker-compose.release.yml`).
+- **`docker-compose.release.yml`** - запуск из готовых образов (вместо `build:` используется `image:`).
+- **GitLab Container Registry** - хранилище образов.
+
+### Настройка CI/CD в GitLab
+
+#### 1. Создать репозиторий на GitLab
+
+Создайте проект и запушьте код:
+
+```bash
+git remote add gitlab https://gitlab.com/<логин>/<проект>.git
+git push -u gitlab main
+```
+
+#### 2. Зарегистрировать GitLab Runner (запустится локально в Docker)
+
+**Шаг 2.1.** В GitLab откройте проект → **Settings → CI/CD → Runners → Create project runner**. Скопируйте **registration token**
+
+**Шаг 2.2.** На своей машине запустите раннер:
+
+```powershell
+docker run -d --name gitlab-runner --restart always `
+  -v /srv/gitlab-runner/config:/etc/gitlab-runner `
+  -v /var/run/docker.sock:/var/run/docker.sock `
+  gitlab/gitlab-runner:latest
+```
+
+**Шаг 2.3.** Зарегистрируйте раннер (замените `<TOKEN>` на скопированный):
+
+```powershell
+docker exec -it gitlab-runner gitlab-runner register `
+  --url "https://gitlab.com" `
+  --token "<TOKEN>" `
+  --executor "docker" `
+  --docker-image "docker:24-cli" `
+  --description "docker-runner" `
+  --docker-privileged
+```
+
+При запросе **executor** выберите `docker`. Флаг `--docker-privileged` обязателен - он нужен для работы Docker-in-Docker (DinD).
+
+**Шаг 2.4.** Добавьте теги раннеру на сайте: **Settings → CI/CD → Runners → <раннер> → Tags** → `docker`, `build`.
+
+**Шаг 2.5.** Отключите **shared runners** в проекте: **Settings → CI/CD → Runners → Shared runners → снять галочку**. Иначе GitLab потребует верификацию аккаунта, даже если у вас есть свой раннер.
+
+#### 3. Запустить пайплайн
+
+Пайплайн стартует только при создании тега:
+
+```bash
+git tag -a v1.0.0 -m "Release v1.0.0"
+git push gitlab v1.0.0
+```
+
+Стадии его выполнения можно увидеть в **Build → Pipelines**. После успеха всех стадий появятся образы Docker в **Deploy → Container Registry**.
+
+#### 4. Перемещение тега (для повторного запуска)
+
+Если нужно пересобрать на новом коммите без создания нового тега:
+
+```bash
+git push gitlab main                  # сначала запушить сам коммит
+git tag -f v1.0.0                     # переместить тег на текущий коммит локально
+git push gitlab v1.0.0 --force        # принудительно перезаписать данный тег в GitLab
+```
+
+**Важно:** если в GitLab включена защита тегов (`Settings → Repository → Protected tags`), `--force` может не сработать.
+
+#### 5. Получить Personal Access Token для pull
+
+Чтобы локально тянуть образы из GitLab Container Registry:
+
+1. GitLab → **Settings (проекта) → Access Tokens**.
+2. **Add new token**:
+   - **Name:** `docker-local-pull`
+   - **Scopes:** `read_registry` (или `Container Repository: Read` для fine-grained, если токен создаётся в настройках User)
+3. **Create** → скопируйте токен для будущего логина в `registry.gitlab.com` через Docker.
+
+#### 6. Запуск из готовых образов
+
+**Шаг 6.1.** Залогиньтесь в registry (один раз):
+
+```powershell
+docker login registry.gitlab.com
+```
+
+- **Username:** ваш GitLab-логин
+- **Password:** Personal Access Token (не пароль)
+
+Креды сохраняются в `~/.docker/config.json` - повторно вводить не нужно, пока токен валиден.
+
+**Шаг 6.2.** Поднимите стек из готовых образов:
+
+```powershell
+docker compose -f docker-compose.release.yml pull
+docker compose -f docker-compose.release.yml up -d
+docker compose -f docker-compose.release.yml run --rm client
+```
+
+`pull` перед `up` гарантирует, что будут использованы свежие версии.
+
+### Управление раннером
+
+| Задача | Команда |
+|---|---|
+| Остановить раннер | `docker stop gitlab-runner` |
+| Запустить раннер | `docker start gitlab-runner` |
+| Посмотреть статус | `docker ps -a --filter "name=gitlab-runner"` |
+| Отключить автостарт | `docker update --restart no gitlab-runner` |
+| Удалить раннер | `docker rm -f gitlab-runner` |
+
+**GitLab отслеживает раннер автоматически.**
+
+---
+
+
+## Сборка после изменений (локально)
 
 ```bash
 # Пересобрать только api
@@ -197,4 +324,7 @@ docker compose down
 
 # Полная (volume удаляются)
 docker compose down -v
+
+# Только release-compose
+docker compose -f docker-compose.release.yml down
 ```
