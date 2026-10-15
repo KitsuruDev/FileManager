@@ -10,6 +10,9 @@ workflow:
 variables:
   DOCKER_DRIVER: overlay2
   DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_HOST: tcp://docker:2376
+  DOCKER_TLS_VERIFY: 1
+  DOCKER_CERT_PATH: "/certs/client"
   DOCKER_BUILDKIT: "1"
 
 # Сборка API
@@ -17,7 +20,8 @@ build-api:
   stage: build
   image: docker:24-cli
   services:
-    - docker:24-dind
+    - name: docker:24-dind
+      command: ["--tls=true", "--tlscertdir=/certs"]
   rules:
     - if: $CI_COMMIT_TAG
   before_script:
@@ -32,7 +36,8 @@ build-client:
   stage: build
   image: docker:24-cli
   services:
-    - docker:24-dind
+    - name: docker:24-dind
+      command: ["--tls=true", "--tlscertdir=/certs"]
   rules:
     - if: $CI_COMMIT_TAG
   before_script:
@@ -47,7 +52,8 @@ build-nginx:
   stage: build
   image: docker:24-cli
   services:
-    - docker:24-dind
+    - name: docker:24-dind
+      command: ["--tls=true", "--tlscertdir=/certs"]
   rules:
     - if: $CI_COMMIT_TAG
   before_script:
