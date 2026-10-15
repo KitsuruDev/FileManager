@@ -1,0 +1,77 @@
+services:
+  # postgres - официальный образ
+  db:
+    image: postgres:16-alpine
+    container_name: fm_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fm_user
+      POSTGRES_PASSWORD: fm_password
+      POSTGRES_DB: filemanager
+    volumes:
+      - fm_pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    networks:
+      - fm_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fm_user -d filemanager"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # api - из registry
+  api:
+    image: registry.gitlab.com/KitsuruDev/filemanager/api:v1.0.0
+    container_name: fm_api
+    restart: unless-stopped
+    env_file: ./api/.env
+    environment:
+      DB_HOST: db
+      STORAGE_ROOT: /storage
+    volumes:
+      - fm_storage:/storage
+    networks:
+      - fm_net
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # nginx - из registry (сертификаты уже внутри образа)
+  nginx:
+    image: registry.gitlab.com/KitsuruDev/filemanager/nginx:v1.0.0
+    container_name: fm_nginx
+    restart: unless-stopped
+    ports:
+      - "8443:443"
+    networks:
+      - fm_net
+    depends_on:
+      - api
+
+  # client - из registry
+  client:
+    image: registry.gitlab.com/KitsuruDev/filemanager/client:v1.0.0
+    container_name: fm_client
+    stdin_open: true
+    tty: true
+    environment:
+      API_URL: https://nginx
+      CA_BUNDLE: /etc/nginx/certs/server.crt
+    volumes:
+      - fm_certs_internal:/certs:ro
+      - ./client/uploads:/uploads:ro
+    networks:
+      - fm_net
+    depends_on:
+      - nginx
+    profiles:
+      - cli
+
+networks:
+  fm_net:
+    driver: bridge
+
+volumes:
+  fm_pgdata:
+  fm_storage:
+  fm_certs_internal:

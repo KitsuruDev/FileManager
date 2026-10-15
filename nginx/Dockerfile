@@ -1,8 +1,6 @@
 FROM nginx:1.27-alpine
 
+# сертификаты монтируются в runtime через volume
 COPY nginx.conf /etc/nginx/nginx.conf
-
-# сертификаты будут созданы в CI и положены сюда перед сборкой
-COPY certs/ /etc/nginx/certs/
 
 EXPOSE 443
