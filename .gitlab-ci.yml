@@ -102,9 +102,10 @@ build-and-deploy-docker:
     - docker push "$CI_REGISTRY_IMAGE/nginx:$CI_COMMIT_TAG"
     # локальный запуск (smoke-тест для проверки работоспособности)
     - echo "Запуск контейнера API для проверки..."
-    - docker run -d --name test_api "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_TAG"
+    - docker run -d --name test_api -e STORAGE_ROOT=/tmp/storage "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_TAG"
     - sleep 5
-    - docker ps
+    # проверка, что контейнер реально работает (не упал)
+    - docker ps --filter "name=test_api" --filter "status=running" | grep test_api
     - docker logs test_api
     - docker stop test_api
   rules:
