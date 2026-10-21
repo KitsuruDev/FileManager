@@ -1,5 +1,8 @@
-import pytest, os, shutil, tempfile
+import pytest, os, sys, shutil, tempfile
 from pathlib import Path
+
+# добавление корневой папки api в sys.path, чтобы pytest находил модуль app
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 @pytest.fixture
 def temp_storage_root(monkeypatch):

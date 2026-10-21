@@ -56,7 +56,7 @@ test-api:
     - pip install -r requirements.txt
   script:
     - echo "Запуск unit-тестов..."
-    - pytest tests/ --junitxml=report.xml -v
+    - PYTHONPATH=. pytest tests/ --junitxml=report.xml -v
   artifacts:
     when: always # сохранение отчета даже при падении тестов
     reports:
