@@ -1,0 +1,5 @@
+# Игнорируем кэш, артефакты и локальные данные
+.cache/
+api/storage/
+node_modules/
+tests/
