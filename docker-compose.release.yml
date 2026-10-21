@@ -33,7 +33,7 @@ services:
 
   # api - из registry
   api:
-    image: registry.gitlab.com/kitsurudev/filemanager/api:v1.0.0
+    image: registry.gitlab.com/kitsurudev/filemanager/api:v1.1.0
     container_name: fm_api
     restart: unless-stopped
     env_file: ./api/.env
@@ -50,7 +50,7 @@ services:
 
   # nginx - из registry, сертификаты монтируются из volume
   nginx:
-    image: registry.gitlab.com/kitsurudev/filemanager/nginx:v1.0.0
+    image: registry.gitlab.com/kitsurudev/filemanager/nginx:v1.1.0
     container_name: fm_nginx
     restart: unless-stopped
     ports:
@@ -67,7 +67,7 @@ services:
 
   # client - из registry
   client:
-    image: registry.gitlab.com/kitsurudev/filemanager/client:v1.0.0
+    image: registry.gitlab.com/kitsurudev/filemanager/client:v1.1.0
     container_name: fm_client
     stdin_open: true
     tty: true
