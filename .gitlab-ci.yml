@@ -1,59 +1,112 @@
 stages:
   - build
-
-workflow:
-  rules:
-    - if: $CI_COMMIT_TAG
-      when: always
-    - when: never
+  - test
+  - sast
+  - deploy
 
 variables:
   DOCKER_DRIVER: overlay2
   DOCKER_HOST: tcp://docker:2375
   DOCKER_TLS_CERTDIR: ""
   DOCKER_BUILDKIT: "1"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip" # директория для кэша pip
 
-# Сборка API
-build-api:
+# кэширование зависимостей между запусками
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .cache/pip/
+
+# пайплайн запускается на теги (для деплоя) и на пуши/MR (для тестов и SAST)
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ==========================================
+# 1. СТАДИЯ СБОРКИ (Build)
+# ==========================================
+build-app:
   stage: build
+  image: python:3.12-slim
+  script:
+    - echo "Проверка синтаксиса и компиляция Python-модулей..."
+    - cd api && python -m compileall .
+    - cd ../client && python -m compileall .
+  # Артефакты передаются в следующие стадии
+  artifacts:
+    paths:
+      - api/
+      - client/
+      - nginx/
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ==========================================
+# 2. СТАДИЯ ТЕСТИРОВАНИЯ (Test)
+# ==========================================
+test-api:
+  stage: test
+  image: python:3.12-slim
+  needs: ["build-app"]
+  before_script:
+    - cd api
+    - pip install -r requirements.txt
+  script:
+    - echo "Запуск unit-тестов..."
+    - pytest tests/ --junitxml=report.xml -v
+  artifacts:
+    when: always # сохранение отчета даже при падении тестов
+    reports:
+      junit: api/report.xml
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ==========================================
+# 3. СТАДИЯ SAST (Статический анализ)
+# ==========================================
+sast-semgrep:
+  stage: sast
+  image: returntocorp/semgrep
+  needs: ["build-app"]
+  script:
+    - echo "Запуск Semgrep..."
+    # --error - прерыв сборки при нахождении уязвимостей
+    - semgrep scan --config auto --error --text .
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ==========================================
+# 4. СТАДИЯ РАЗВЕРТЫВАНИЯ (Local Deploy)
+# ==========================================
+build-and-deploy-docker:
+  stage: deploy
   image: docker:24-cli
   services:
     - docker:24-dind
-  rules:
-    - if: $CI_COMMIT_TAG
+  needs: ["test-api", "sast-semgrep"]
   before_script:
+    # безопасное управление секретами через переменные GitLab
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
-    - docker build -t "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_TAG" -t "$CI_REGISTRY_IMAGE/api:latest" ./api
+    # сборка образов
+    - docker build -t "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_TAG" ./api
+    - docker build -t "$CI_REGISTRY_IMAGE/client:$CI_COMMIT_TAG" ./client
+    - docker build -t "$CI_REGISTRY_IMAGE/nginx:$CI_COMMIT_TAG" ./nginx
+    # пуш в registry
     - docker push "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_TAG"
-    - docker push "$CI_REGISTRY_IMAGE/api:latest"
-
-# Сборка клиента
-build-client:
-  stage: build
-  image: docker:24-cli
-  services:
-    - docker:24-dind
-  rules:
-    - if: $CI_COMMIT_TAG
-  before_script:
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-  script:
-    - docker build -t "$CI_REGISTRY_IMAGE/client:$CI_COMMIT_TAG" -t "$CI_REGISTRY_IMAGE/client:latest" ./client
     - docker push "$CI_REGISTRY_IMAGE/client:$CI_COMMIT_TAG"
-    - docker push "$CI_REGISTRY_IMAGE/client:latest"
-
-# Сборка Nginx (без сертификатов)
-build-nginx:
-  stage: build
-  image: docker:24-cli
-  services:
-    - docker:24-dind
-  rules:
-    - if: $CI_COMMIT_TAG
-  before_script:
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-  script:
-    - docker build -t "$CI_REGISTRY_IMAGE/nginx:$CI_COMMIT_TAG" -t "$CI_REGISTRY_IMAGE/nginx:latest" ./nginx
     - docker push "$CI_REGISTRY_IMAGE/nginx:$CI_COMMIT_TAG"
-    - docker push "$CI_REGISTRY_IMAGE/nginx:latest"
+    # локальный запуск (smoke-тест для проверки работоспособности)
+    - echo "Запуск контейнера API для проверки..."
+    - docker run -d --name test_api "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_TAG"
+    - sleep 5
+    - docker ps
+    - docker logs test_api
+    - docker stop test_api
+  rules:
+    # деплой и сборка Docker-образов происходят ТОЛЬКО по тегам
+    - if: $CI_COMMIT_TAG

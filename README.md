@@ -25,6 +25,11 @@ flowchart LR
 - **db** - PostgreSQL 16
 - **cert-init** - одноразовый контейнер, генерирует self-signed сертификаты
 
+### Особенности сборки Docker
+- **Многоступенчатая сборка (multi-stage build)**: образы `api` и `client` собираются в два этапа (компиляция зависимостей -> финальный образ), что минимизирует размер.
+- **Непривилегированные пользователи**: контейнеры `api` и `client` запускаются от пользователей `appuser` и `cliuser` соответственно (CWE-250).
+- **Безопасность Nginx**: сертификаты монтируются в runtime, конфиг проверяется на этапе сборки (`nginx -t`).
+
 
 ## Требования
 
@@ -119,21 +124,20 @@ curl -k https://localhost:8443/api/health
 
 ## CI/CD (GitLab)
 
-Пайплайн собирает три Docker-образа (`api`, `client`, `nginx`) и пушит их в **GitLab Container Registry**. Запускается **только по тегу** - обычные коммиты и ветки не триггерят сборку.
+Настроен полноценный DevSecOps-пайплайн. Сборка и деплой разделены по триггерам:
+- **Обычный коммит (push) или Merge Request**: запускаются проверки качества (`build`, `test`, `sast`). Docker-образы *не* собираются, чтобы не тратить ресурсы.
+- **Создание тега (например, `v1.0.0`)**: запускается полный цикл, включая сборку Docker-образов, их пуш в Registry и локальный тест запуска (`deploy`).
 
-### Структура
+### Стадии пайплайна
 
-- **`.gitlab-ci.yml`** - описание пайплайна (в корне репозитория).
-- **`nginx/Dockerfile`** - свой Dockerfile для nginx (копирует конфиг, без сертификатов - они генерируются при поднятии контейнеров через `docker-compose.release.yml`).
-- **`docker-compose.release.yml`** - запуск из готовых образов (вместо `build:` используется `image:`).
-- **GitLab Container Registry** - хранилище образов.
+1. **`build`**: Проверка синтаксиса Python-кода и передача исходников как артефактов.
+2. **`test`**: Запуск unit-тестов (`pytest`). Покрыты критичные модули безопасности (path traversal, XXE, zip-slip, rate limit). Генерируется JUnit-отчёт для GitLab.
+3. **`sast`**: Статический анализ безопасности через **Semgrep**. При обнаружении уязвимостей уровня High/Critical пайплайн падает.
+4. **`deploy`**: Сборка Docker-образов (multi-stage), пуш в GitLab Container Registry и локальный smoke-тест (запуск контейнера).
 
 ### Настройка CI/CD в GitLab
 
 #### 1. Создать репозиторий на GitLab
-
-Создайте проект и запушьте код:
-
 ```bash
 git remote add gitlab https://gitlab.com/<логин>/<проект>.git
 git push -u gitlab main
@@ -141,10 +145,9 @@ git push -u gitlab main
 
 #### 2. Зарегистрировать GitLab Runner (запустится локально в Docker)
 
-**Шаг 2.1.** В GitLab откройте проект → **Settings → CI/CD → Runners → Create project runner**. Скопируйте **registration token**
+**Шаг 2.1.** В GitLab откройте проект → **Settings → CI/CD → Runners → Create project runner**. Скопируйте **registration token**.
 
-**Шаг 2.2.** На своей машине запустите раннер:
-
+**Шаг 2.2.** Запустите раннер:
 ```powershell
 docker run -d --name gitlab-runner --restart always `
   -v /srv/gitlab-runner/config:/etc/gitlab-runner `
@@ -153,7 +156,6 @@ docker run -d --name gitlab-runner --restart always `
 ```
 
 **Шаг 2.3.** Зарегистрируйте раннер (замените `<TOKEN>` на скопированный):
-
 ```powershell
 docker exec -it gitlab-runner gitlab-runner register `
   --url "https://gitlab.com" `
@@ -164,67 +166,45 @@ docker exec -it gitlab-runner gitlab-runner register `
   --docker-privileged
 ```
 
-При запросе **executor** выберите `docker`. Флаг `--docker-privileged` обязателен - он нужен для работы Docker-in-Docker (DinD).
+**Шаг 2.4.** Добавьте теги раннеру: **Settings → CI/CD → Runners → <раннер> → Tags** → `docker`, `build`.
 
-**Шаг 2.4.** Добавьте теги раннеру на сайте: **Settings → CI/CD → Runners → <раннер> → Tags** → `docker`, `build`.
+**Шаг 2.5.** Отключите **shared runners** в проекте: **Settings → CI/CD → Runners → Shared runners → снять галочку**.
 
-**Шаг 2.5.** Отключите **shared runners** в проекте: **Settings → CI/CD → Runners → Shared runners → снять галочку**. Иначе GitLab потребует верификацию аккаунта, даже если у вас есть свой раннер.
-
-#### 3. Запустить пайплайн
-
-Пайплайн стартует только при создании тега:
-
+#### 3. Запустить пайплайн (Релиз)
+Для деплоя создайте тег:
 ```bash
 git tag -a v1.0.0 -m "Release v1.0.0"
 git push gitlab v1.0.0
 ```
+После успеха всех стадий образы появятся в **Deploy → Container Registry**.
 
-Стадии его выполнения можно увидеть в **Build → Pipelines**. После успеха всех стадий появятся образы Docker в **Deploy → Container Registry**.
-
-#### 4. Перемещение тега (для повторного запуска)
-
-Если нужно пересобрать на новом коммите без создания нового тега:
-
+#### 4. Перемещение тега (для повторного релиза)
+Если нужно пересобрать без создания нового тега:
 ```bash
-git push gitlab main                  # сначала запушить сам коммит
-git tag -f v1.0.0                     # переместить тег на текущий коммит локально
-git push gitlab v1.0.0 --force        # принудительно перезаписать данный тег в GitLab
+git push gitlab main                  # сначала запушить коммит
+git tag -f v1.0.0                     # переместить тег локально
+git push gitlab v1.0.0 --force        # перезаписать тег в GitLab
 ```
 
-**Важно:** если в GitLab включена защита тегов (`Settings → Repository → Protected tags`), `--force` может не сработать.
-
 #### 5. Получить Personal Access Token для pull
-
-Чтобы локально тянуть образы из GitLab Container Registry:
-
 1. GitLab → **Settings (проекта) → Access Tokens**.
-2. **Add new token**:
-   - **Name:** `docker-local-pull`
-   - **Scopes:** `read_registry` (или `Container Repository: Read` для fine-grained, если токен создаётся в настройках User)
-3. **Create** → скопируйте токен для будущего логина в `registry.gitlab.com` через Docker.
+2. **Add new token**: Name: `docker-local-pull`, Scopes: `read_registry`.
+3. Скопируйте токен.
 
 #### 6. Запуск из готовых образов
-
-**Шаг 6.1.** Залогиньтесь в registry (один раз):
-
+**Шаг 6.1.** Залогиньтесь в registry:
 ```powershell
 docker login registry.gitlab.com
 ```
-
 - **Username:** ваш GitLab-логин
-- **Password:** Personal Access Token (не пароль)
-
-Креды сохраняются в `~/.docker/config.json` - повторно вводить не нужно, пока токен валиден.
+- **Password:** Personal Access Token
 
 **Шаг 6.2.** Поднимите стек из готовых образов:
-
 ```powershell
 docker compose -f docker-compose.release.yml pull
 docker compose -f docker-compose.release.yml up -d
 docker compose -f docker-compose.release.yml run --rm client
 ```
-
-`pull` перед `up` гарантирует, что будут использованы свежие версии.
 
 ### Управление раннером
 
@@ -236,10 +216,7 @@ docker compose -f docker-compose.release.yml run --rm client
 | Отключить автостарт | `docker update --restart no gitlab-runner` |
 | Удалить раннер | `docker rm -f gitlab-runner` |
 
-**GitLab отслеживает раннер автоматически.**
-
 ---
-
 
 ## Сборка после изменений (локально)
 
@@ -301,6 +278,7 @@ SELECT * FROM login_attempts ORDER BY id DESC;       -- rate limit
 | **204** | Observable Response Discrepancy | User enumeration по ответу | Единое сообщение «Неверное имя пользователя или пароль» (`auth.py`) |
 | **208** | Observable Timing Discrepancy | User enumeration по таймингу | Фиктивный `bcrypt.hashpw` для несуществующих username (`auth.py`) |
 | **209** | Generation of Error Message Containing Sensitive Information | Утечка через ошибки | Единый `@app.errorhandler` в `api.py`, без стектрейсов и деталей БД |
+| **250** | Execution with Unnecessary Privileges | Запуск от root в контейнере | Dockerfile: `USER appuser` / `USER cliuser` |
 | **307** | Improper Restriction of Excessive Authentication Attempts | Перебор паролей | Rate limit по IP через таблицу `login_attempts` (`auth.py`) |
 | **319** | Cleartext Transmission of Sensitive Information | Открытый трафик | HTTPS через nginx, HTTP → HTTPS редирект (`nginx.conf`) |
 | **326** | Inadequate Encryption Strength | Слабые шифры | `ssl_ciphers HIGH:!aNULL:!MD5`, `TLSv1.2 TLSv1.3` (`nginx.conf`) |
