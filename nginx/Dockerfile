@@ -7,8 +7,9 @@ FROM nginx:1.27-alpine AS builder
 # (ошибка в конфиге -> сборка образа упадет на этом этапе)
 COPY nginx.conf /etc/nginx/nginx.conf
 
-# временная запись для проверки скрипта nginx и запуск проверки
-RUN echo "127.0.0.1 api" >> /etc/hosts && nginx -t
+# временно подменяем хост "api" на локальный IP ТОЛЬКО для проверки синтаксиса
+# (во время сборки Docker-образа нет сети compose, поэтому "api" не резолвится)
+RUN sed -i 's/api:5000/127.0.0.1:5000/g' /etc/nginx/nginx.conf && nginx -t
 
 
 # ==========================================
@@ -20,7 +21,8 @@ FROM nginx:1.27-alpine
 RUN rm /etc/nginx/conf.d/default.conf
 
 # копирование своего конфига
-COPY --from=builder /etc/nginx/nginx.conf /etc/nginx/nginx.conf
+# (заново из папки, а не из builder, чтобы в релиз попал оригинальный конфиг с правильным "api:5000")
+COPY nginx.conf /etc/nginx/nginx.conf
 
 # USER nginx не используется здесь, поскольку мастер-процессу nginx нужны root-права для
 # прослушивания порта 443 (привилегированный - меньше 1024).
